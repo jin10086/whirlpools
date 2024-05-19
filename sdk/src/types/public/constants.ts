@@ -19,7 +19,7 @@ export const ORCA_WHIRLPOOLS_CONFIG = new PublicKey("2LecshUwdy9xi7meFgHtFJQNSKk
  * Orca's supported tick spacings.
  * @category Constants
  */
-export const ORCA_SUPPORTED_TICK_SPACINGS = [1, 8, 64, 128];
+export const ORCA_SUPPORTED_TICK_SPACINGS = [1, 2, 4, 8, 16, 64, 128, 256];
 
 /**
  * The number of rewards supported by this whirlpool.
@@ -50,6 +50,18 @@ export const MAX_SQRT_PRICE = "79226673515401279992447579055";
  * @category Constants
  */
 export const MIN_SQRT_PRICE = "4295048016";
+
+/**
+ * The minimum sqrt-price supported by the Whirlpool program.
+ * @category Constants
+ */
+export const MIN_SQRT_PRICE_BN = new BN(MIN_SQRT_PRICE);
+
+/**
+ * The maximum sqrt-price supported by the Whirlpool program.
+ * @category Constants
+ */
+export const MAX_SQRT_PRICE_BN = new BN(MAX_SQRT_PRICE);
 
 /**
  * The number of initialized ticks that a tick-array account can hold.

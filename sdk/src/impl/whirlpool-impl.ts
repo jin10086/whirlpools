@@ -1,6 +1,7 @@
 import { Address, BN, translateAddress } from "@coral-xyz/anchor";
 import {
   AddressUtil,
+  MEASUREMENT_BLOCKHASH,
   Percentage,
   TokenUtil,
   TransactionBuilder,
@@ -40,6 +41,7 @@ import {
 import { Whirlpool } from "../whirlpool-client";
 import { PositionImpl } from "./position-impl";
 import { getRewardInfos, getTokenVaultAccountInfos } from "./util";
+import { checkMergedTransactionSizeIsValid } from "../utils/txn-utils";
 
 export class WhirlpoolImpl implements Whirlpool {
   private data: WhirlpoolData;
@@ -94,7 +96,8 @@ export class WhirlpoolImpl implements Whirlpool {
     tickUpper: number,
     liquidityInput: IncreaseLiquidityInput,
     wallet?: Address,
-    funder?: Address
+    funder?: Address,
+    positionMint?: PublicKey
   ) {
     await this.refresh();
     return this.getOpenPositionWithOptMetadataTx(
@@ -102,7 +105,9 @@ export class WhirlpoolImpl implements Whirlpool {
       tickUpper,
       liquidityInput,
       !!wallet ? AddressUtil.toPubKey(wallet) : this.ctx.wallet.publicKey,
-      !!funder ? AddressUtil.toPubKey(funder) : this.ctx.wallet.publicKey
+      !!funder ? AddressUtil.toPubKey(funder) : this.ctx.wallet.publicKey,
+      false,
+      positionMint
     );
   }
 
@@ -111,8 +116,8 @@ export class WhirlpoolImpl implements Whirlpool {
     tickUpper: number,
     liquidityInput: IncreaseLiquidityInput,
     sourceWallet?: Address,
-    positionWallet?: Address,
-    funder?: Address
+    funder?: Address,
+    positionMint?: PublicKey
   ) {
     await this.refresh();
     return this.getOpenPositionWithOptMetadataTx(
@@ -121,7 +126,8 @@ export class WhirlpoolImpl implements Whirlpool {
       liquidityInput,
       !!sourceWallet ? AddressUtil.toPubKey(sourceWallet) : this.ctx.wallet.publicKey,
       !!funder ? AddressUtil.toPubKey(funder) : this.ctx.wallet.publicKey,
-      true
+      true,
+      positionMint
     );
   }
 
@@ -253,7 +259,8 @@ export class WhirlpoolImpl implements Whirlpool {
     liquidityInput: IncreaseLiquidityInput,
     wallet: PublicKey,
     funder: PublicKey,
-    withMetadata: boolean = false
+    withMetadata: boolean = false,
+    positionMint?: PublicKey
   ): Promise<{ positionMint: PublicKey; tx: TransactionBuilder }> {
     invariant(TickUtil.checkTickInBounds(tickLower), "tickLower is out of bounds.");
     invariant(TickUtil.checkTickInBounds(tickUpper), "tickUpper is out of bounds.");
@@ -277,13 +284,14 @@ export class WhirlpoolImpl implements Whirlpool {
     );
 
     const positionMintKeypair = Keypair.generate();
+    const positionMintPubkey = positionMint ?? positionMintKeypair.publicKey;
     const positionPda = PDAUtil.getPosition(
       this.ctx.program.programId,
-      positionMintKeypair.publicKey
+      positionMintPubkey
     );
-    const metadataPda = PDAUtil.getPositionMetadata(positionMintKeypair.publicKey);
+    const metadataPda = PDAUtil.getPositionMetadata(positionMintPubkey);
     const positionTokenAccountAddress = getAssociatedTokenAddressSync(
-      positionMintKeypair.publicKey,
+      positionMintPubkey,
       wallet,
       this.ctx.accountResolverOpts.allowPDAOwnerAddress
     );
@@ -301,14 +309,17 @@ export class WhirlpoolImpl implements Whirlpool {
         owner: wallet,
         positionPda,
         metadataPda,
-        positionMintAddress: positionMintKeypair.publicKey,
+        positionMintAddress: positionMintPubkey,
         positionTokenAccount: positionTokenAccountAddress,
         whirlpool: this.address,
         tickLowerIndex: tickLower,
         tickUpperIndex: tickUpper,
       }
     );
-    txBuilder.addInstruction(positionIx).addSigner(positionMintKeypair);
+    txBuilder.addInstruction(positionIx);
+    if(positionMint === undefined) {
+      txBuilder.addSigner(positionMintKeypair);
+    }
 
     const [ataA, ataB] = await resolveOrCreateATAs(
       this.ctx.connection,
@@ -360,7 +371,7 @@ export class WhirlpoolImpl implements Whirlpool {
     txBuilder.addInstruction(liquidityIx);
 
     return {
-      positionMint: positionMintKeypair.publicKey,
+      positionMint: positionMintPubkey,
       tx: txBuilder,
     };
   }
@@ -575,15 +586,24 @@ export class WhirlpoolImpl implements Whirlpool {
 
     txBuilder.addInstruction(positionIx);
 
-    const txBuilders: TransactionBuilder[] = [];
-
-    if (!tokenAccountsTxBuilder.isEmpty()) {
-      txBuilders.push(tokenAccountsTxBuilder);
+    if (tokenAccountsTxBuilder.isEmpty()) {
+      return [txBuilder]
     }
 
-    txBuilders.push(txBuilder);
+    // This handles an edge case where the instructions are too
+    // large to fit in a single transaction and we need to split the
+    // instructions into two transactions.
+    const canFitInOneTransaction = await checkMergedTransactionSizeIsValid(
+      this.ctx,
+      [tokenAccountsTxBuilder, txBuilder],
+      MEASUREMENT_BLOCKHASH
+    )
+    if (!canFitInOneTransaction) {
+      return [tokenAccountsTxBuilder, txBuilder]
+    }
 
-    return txBuilders;
+    tokenAccountsTxBuilder.addInstruction(txBuilder.compressIx(false));
+    return [tokenAccountsTxBuilder]
   }
 
   private async refresh() {
